@@ -1,0 +1,22 @@
+ # Source data — too large to commit
+data/
+
+# Iceberg SQLite catalog database
+catalog/iceberg_catalog.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# dbt
+dbt_nyc_taxi/target/
+dbt_nyc_taxi/logs/
+dbt_nyc_taxi/.user.yml
+
+# Mac
+.DS_Store
+
+# Credentials
+gcp-key.jsonlogs/

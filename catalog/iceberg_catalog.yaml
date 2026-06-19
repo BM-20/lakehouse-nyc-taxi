@@ -1,0 +1,5 @@
+catalog-name: nyc_taxi_catalog
+catalog:
+  type: sql
+  uri: sqlite:///catalog/iceberg_catalog.db
+  warehouse: gs://lakehouse-nyc-taxi/iceberg

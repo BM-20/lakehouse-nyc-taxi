@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: nyc_taxi
+    database: kafka-pipeline-496914
+    schema: nyc_taxi
+    tables:
+      - name: daily_summary
+        description: Daily aggregation of NYC taxi trips from gold Iceberg layer
+      - name: trips_by_hour
+        description: Trip demand and average fare broken down by hour of day
+      - name: trips_by_payment
+        description: Revenue and trip count broken down by payment type
+      - name: vendor_summary
+        description: Trip metrics broken down by taxi vendor

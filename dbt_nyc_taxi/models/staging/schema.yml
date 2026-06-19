@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: stg_daily_summary
+    description: Daily trip and revenue summary filtered to January 2024
+    columns:
+      - name: pickup_date
+        description: Date of taxi pickup
+        tests:
+          - not_null
+          - unique
+      - name: total_trips
+        description: Total number of trips on this date
+        tests:
+          - not_null
+      - name: total_revenue
+        description: Total revenue on this date
+        tests:
+          - not_null
+      - name: avg_fare
+        description: Average fare amount on this date
+        tests:
+          - not_null
+
+  - name: stg_trips_by_hour
+    description: Trip demand and fare metrics by hour of day
+    columns:
+      - name: pickup_hour
+        description: Hour of day (0-23)
+        tests:
+          - not_null
+          - unique
+      - name: total_trips
+        description: Total trips in this hour
+        tests:
+          - not_null
+
+  - name: stg_trips_by_payment
+    description: Revenue breakdown by payment type
+    columns:
+      - name: payment_type
+        description: Payment method used
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Credit Card', 'Cash', 'No Charge', 'Dispute', 'Unknown', 'Voided']
+      - name: total_trips
+        description: Total trips using this payment type
+        tests:
+          - not_null
+
+  - name: stg_vendor_summary
+    description: Trip metrics by taxi vendor
+    columns:
+      - name: vendor_name
+        description: Name of the taxi vendor
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Creative Mobile Technologies', 'VeriFone']
+      - name: total_trips
+        description: Total trips by this vendor
+        tests:
+          - not_null
