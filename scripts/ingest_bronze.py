@@ -1,73 +1,97 @@
-# Connects to the Iceberg catalog and manages table creation/writes
-from pyiceberg.catalog.sql import SqlCatalog
+"""Bronze layer: append one month of raw NYC Yellow Taxi data to Iceberg.
 
-# Reads the source Parquet file and builds the PyArrow table used for ingestion
-import pyarrow.parquet as pq
-import pyarrow as pa
+Incremental and idempotent. Each run appends a single month as a new Iceberg
+snapshot (so time-travel history is real), downloading the source file from the
+public NYC TLC host if it isn't already in data/raw/, and skipping any month
+that has already been loaded.
 
-# Used to timestamp when each row was ingested
+Usage:
+    python scripts/ingest_bronze.py --month 2024-01
+"""
+from __future__ import annotations
+
+import argparse
 from datetime import datetime
 
-# Connect to the catalog
-catalog = SqlCatalog(
-    "nyc_taxi_catalog",
-    **{
-        "uri": "sqlite:///catalog/iceberg_catalog.db",
-        "warehouse": "gs://lakehouse-nyc-taxi/iceberg",
-    }
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from lakehouse_common import (
+    ensure_local_parquet,
+    get_catalog,
+    source_file,
+    source_file_loaded,
 )
 
-# Create bronze namespace if it doesn't exist
-if ("bronze",) not in catalog.list_namespaces():
-    catalog.create_namespace("bronze")
+TABLE_NAME = "bronze.yellow_taxi_raw"
+TABLE_LOCATION = "gs://lakehouse-nyc-taxi/iceberg/bronze/yellow_taxi_raw"
 
-# Read source Parquet file into a PyArrow table
-print("📂 Reading source Parquet file...")
-df = pq.read_table("data/raw/yellow_tripdata_2024-01.parquet")
 
-# Add bronze layer metadata columns
-print("➕ Adding metadata columns...")
-df = df.append_column(
-    "_source_file",
-    pa.array(["yellow_tripdata_2024-01.parquet"] * len(df), type=pa.string())
-)
-df = df.append_column(
-    "_ingested_at",
-    pa.array([datetime.now()] * len(df), type=pa.timestamp('us'))
-)
+def run(month: str) -> None:
+    """Append one month (e.g. '2024-01') of raw trip data to the bronze table."""
+    catalog = get_catalog()
+    file = source_file(month)
 
-# Create the bronze table or drop bronze table if it already exists
-table_name = "bronze.yellow_taxi_raw"
+    # Create bronze namespace if it doesn't exist
+    if ("bronze",) not in catalog.list_namespaces():
+        catalog.create_namespace("bronze")
 
-if catalog.table_exists(table_name):
-    print(f"🔄 Table {table_name} exists — overwriting...")
-    catalog.drop_table(table_name)
+    # Idempotency: skip months already present so Airflow retries / re-runs are
+    # safe no-ops.
+    table = catalog.load_table(TABLE_NAME) if catalog.table_exists(TABLE_NAME) else None
+    if table is not None and source_file_loaded(table, file):
+        print(f"⏭️  {file} already loaded into {TABLE_NAME} — skipping.")
+        return
 
-#Create the Iceberg table, the schema is automatically inferred from the PyArrow table
-print(f"📝 Creating table {table_name}...")
-table = catalog.create_table(
-    table_name,
-    schema=df.schema,
-    location=f"gs://lakehouse-nyc-taxi/iceberg/bronze/yellow_taxi_raw"
-)
-# if catalog.table_exists(table_name):
-#     print(f"📸 Table {table_name} exists — appending to create new snapshot...")
-#     table = catalog.load_table(table_name)
-# else:
-#     print(f"📝 Creating table {table_name}...")
-#     table = catalog.create_table(
-#         table_name,
-#         schema=df.schema,
-#         location=f"gs://lakehouse-nyc-taxi/iceberg/bronze/yellow_taxi_raw"
-#     )
-#This creates the data and metadata folders in GCS
-print(f"⬆️  Writing {len(df):,} rows to GCS...")
-table.append(df)
+    # Read source parquet (downloading from NYC TLC if not present locally)
+    path = ensure_local_parquet(month)
+    print(f"📂 Reading {path.name} ...")
+    df = pq.read_table(path)
 
-print(f"""
-✅ Bronze layer complete!
-   Table: {table_name}
-   Rows: {len(df):,}
-   Location: gs://lakehouse-nyc-taxi/iceberg/bronze/
-   Metadata columns: _source_file, _ingested_at
+    # Add bronze layer metadata columns so every row can be traced back to its
+    # origin file and ingestion time.
+    print("➕ Adding metadata columns...")
+    df = df.append_column(
+        "_source_file",
+        pa.array([file] * len(df), type=pa.string()),
+    )
+    df = df.append_column(
+        "_ingested_at",
+        pa.array([datetime.now()] * len(df), type=pa.timestamp("us")),
+    )
+
+    # Create the table on first run (schema inferred); otherwise append a new
+    # snapshot to the existing table.
+    if table is None:
+        print(f"📝 Creating table {TABLE_NAME}...")
+        table = catalog.create_table(
+            TABLE_NAME,
+            schema=df.schema,
+            location=TABLE_LOCATION,
+        )
+
+    print(f"⬆️  Appending {len(df):,} rows to GCS...")
+    table.append(df)
+
+    # Reload to report the up-to-date snapshot count.
+    table = catalog.load_table(TABLE_NAME)
+    print(f"""
+✅ Bronze layer updated!
+   Table:     {TABLE_NAME}
+   Month:     {month}
+   Rows added: {len(df):,}
+   Snapshots:  {len(table.metadata.snapshots)}
+   Location:   {TABLE_LOCATION}
 """)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Append a month of raw NYC taxi data to the bronze Iceberg table."
+    )
+    parser.add_argument("--month", required=True, help="Month to load, e.g. 2024-01")
+    run(parser.parse_args().month)
+
+
+if __name__ == "__main__":
+    main()

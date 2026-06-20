@@ -1,158 +1,142 @@
-#Connects to the same Iceberg catalog used in bronze and silver layers
-from pyiceberg.catalog.sql import SqlCatalog
+"""Gold layer: rebuild the business aggregation tables from the silver layer.
 
-# PyArrow is used to read the silver table and compute aggregations
-import pyarrow as pa
-import pyarrow.compute as pc
+The gold tables are global aggregates (by hour, payment type, vendor, and date),
+so they must reflect *all* silver data, not just the latest month. Each run
+recomputes them from the full silver table and overwrites the gold tables in
+place (one new snapshot each), which is both correct and idempotent.
 
+Aggregation is done with DuckDB ``GROUP BY`` over the silver data rather than
+per-group Python loops, so a full recompute stays fast and light as silver grows
+month over month.
+
+Usage:
+    python scripts/ingest_gold.py
+"""
+from __future__ import annotations
+
+import argparse
 from datetime import datetime
-# Connect to catalog
-catalog = SqlCatalog(
-    "nyc_taxi_catalog",
-    **{
-        "uri": "sqlite:///catalog/iceberg_catalog.db",
-        "warehouse": "gs://lakehouse-nyc-taxi/iceberg",
-    }
-)
 
-# Create gold namespace if it already doesnt exist
-if ("gold",) not in catalog.list_namespaces():
-    catalog.create_namespace("gold")
+import duckdb
+import pyarrow as pa
 
-# Read silver table
-print("📂 Reading silver layer...")
-silver_table = catalog.load_table("silver.yellow_taxi_cleaned")
-df = silver_table.scan().to_arrow()
-print(f"   Rows loaded: {len(df):,}")
+from lakehouse_common import get_catalog
 
-print("🔨 Building trips_by_hour...")
+SILVER_TABLE = "silver.yellow_taxi_cleaned"
 
-hours = df["pickup_hour"]
-unique_hours = sorted(set(hours.to_pylist()))
-
-# For each hour (0-23), calculate total trips, average fare and average distance
-trips_by_hour = pa.table({
-    "pickup_hour": pa.array(unique_hours, type=pa.int64()),
-    "total_trips": pa.array([
-        pc.sum(pc.equal(hours, h).cast(pa.int64())).as_py()
-        for h in unique_hours
-    ], type=pa.int64()),
-    "avg_fare": pa.array([
-        round(pc.mean(df["fare_amount"].filter(pc.equal(hours, h))).as_py(), 2)
-        for h in unique_hours
-    ], type=pa.float64()),
-    "avg_trip_distance": pa.array([
-        round(pc.mean(df["trip_distance"].filter(pc.equal(hours, h))).as_py(), 2)
-        for h in unique_hours
-    ], type=pa.float64()),
-    "_created_at": pa.array([datetime.now()] * len(unique_hours), type=pa.timestamp('us'))
-})
-
-
-print("🔨 Building trips_by_payment...")
-
-payment_types = df["payment_type"]
-unique_payments = sorted(set(payment_types.to_pylist()))
-
-trips_by_payment = pa.table({
-    "payment_type": pa.array(unique_payments, type=pa.string()),
-    "total_trips": pa.array([
-        pc.sum(pc.equal(payment_types, p).cast(pa.int64())).as_py()
-        for p in unique_payments
-    ], type=pa.int64()),
-    "total_revenue": pa.array([
-        round(pc.sum(df["total_amount"].filter(pc.equal(payment_types, p))).as_py(), 2)
-        for p in unique_payments
-    ], type=pa.float64()),
-    "avg_tip": pa.array([
-        round(pc.mean(df["tip_amount"].filter(pc.equal(payment_types, p))).as_py(), 2)
-        for p in unique_payments
-    ], type=pa.float64()),
-    "_created_at": pa.array([datetime.now()] * len(unique_payments), type=pa.timestamp('us'))
-})
-
-print("🔨 Building vendor_summary...")
-
-vendors = df["vendor_name"]
-unique_vendors = sorted(set(vendors.to_pylist()))
-
-vendor_summary = pa.table({
-    "vendor_name": pa.array(unique_vendors, type=pa.string()),
-    "total_trips": pa.array([
-        pc.sum(pc.equal(vendors, v).cast(pa.int64())).as_py()
-        for v in unique_vendors
-    ], type=pa.int64()),
-    "avg_fare": pa.array([
-        round(pc.mean(df["fare_amount"].filter(pc.equal(vendors, v))).as_py(), 2)
-        for v in unique_vendors
-    ], type=pa.float64()),
-    "avg_distance": pa.array([
-        round(pc.mean(df["trip_distance"].filter(pc.equal(vendors, v))).as_py(), 2)
-        for v in unique_vendors
-    ], type=pa.float64()),
-    "avg_duration_minutes": pa.array([
-        round(pc.mean(df["trip_duration_minutes"].filter(pc.equal(vendors, v))).as_py(), 2)
-        for v in unique_vendors
-    ], type=pa.float64()),
-    "_created_at": pa.array([datetime.now()] * len(unique_vendors), type=pa.timestamp('us'))
-})
-
-print("🔨 Building daily_summary...")
-
-# Extract date from pickup datetime
-dates = pc.cast(pc.floor_temporal(df["pickup_datetime"], unit="day"), pa.date32())
-unique_dates = sorted(set(dates.to_pylist()))
-
-daily_summary = pa.table({
-    "pickup_date": pa.array(unique_dates, type=pa.date32()),
-    "total_trips": pa.array([
-        pc.sum(pc.equal(dates, d).cast(pa.int64())).as_py()
-        for d in unique_dates
-    ], type=pa.int64()),
-    "total_revenue": pa.array([
-        round(pc.sum(df["total_amount"].filter(pc.equal(dates, d))).as_py(), 2)
-        for d in unique_dates
-    ], type=pa.float64()),
-    "avg_fare": pa.array([
-        round(pc.mean(df["fare_amount"].filter(pc.equal(dates, d))).as_py(), 2)
-        for d in unique_dates
-    ], type=pa.float64()),
-    "avg_trip_distance": pa.array([
-        round(pc.mean(df["trip_distance"].filter(pc.equal(dates, d))).as_py(), 2)
-        for d in unique_dates
-    ], type=pa.float64()),
-    "_created_at": pa.array([datetime.now()] * len(unique_dates), type=pa.timestamp('us'))
-})
-
-# Map each gold table name to its corresponding PyArrow table built above
-
-gold_tables = {
-    "gold.trips_by_hour": trips_by_hour,
-    "gold.trips_by_payment": trips_by_payment,
-    "gold.vendor_summary": vendor_summary,
-    "gold.daily_summary": daily_summary,
+# Each gold table: the aggregation SQL (over a DuckDB view named `silver`) and
+# its GCS location.
+GOLD_SPECS = {
+    "gold.trips_by_hour": {
+        "location": "gs://lakehouse-nyc-taxi/iceberg/gold/trips_by_hour",
+        "sql": """
+            SELECT
+                pickup_hour,
+                COUNT(*)                      AS total_trips,
+                ROUND(AVG(fare_amount), 2)    AS avg_fare,
+                ROUND(AVG(trip_distance), 2)  AS avg_trip_distance
+            FROM silver
+            GROUP BY pickup_hour
+            ORDER BY pickup_hour
+        """,
+    },
+    "gold.trips_by_payment": {
+        "location": "gs://lakehouse-nyc-taxi/iceberg/gold/trips_by_payment",
+        "sql": """
+            SELECT
+                payment_type,
+                COUNT(*)                       AS total_trips,
+                ROUND(SUM(total_amount), 2)    AS total_revenue,
+                ROUND(AVG(tip_amount), 2)      AS avg_tip
+            FROM silver
+            GROUP BY payment_type
+            ORDER BY payment_type
+        """,
+    },
+    "gold.vendor_summary": {
+        "location": "gs://lakehouse-nyc-taxi/iceberg/gold/vendor_summary",
+        "sql": """
+            SELECT
+                vendor_name,
+                COUNT(*)                              AS total_trips,
+                ROUND(AVG(fare_amount), 2)            AS avg_fare,
+                ROUND(AVG(trip_distance), 2)          AS avg_distance,
+                ROUND(AVG(trip_duration_minutes), 2)  AS avg_duration_minutes
+            FROM silver
+            GROUP BY vendor_name
+            ORDER BY vendor_name
+        """,
+    },
+    "gold.daily_summary": {
+        "location": "gs://lakehouse-nyc-taxi/iceberg/gold/daily_summary",
+        "sql": """
+            SELECT
+                CAST(pickup_datetime AS DATE)  AS pickup_date,
+                COUNT(*)                       AS total_trips,
+                ROUND(SUM(total_amount), 2)    AS total_revenue,
+                ROUND(AVG(fare_amount), 2)     AS avg_fare,
+                ROUND(AVG(trip_distance), 2)   AS avg_trip_distance
+            FROM silver
+            GROUP BY pickup_date
+            ORDER BY pickup_date
+        """,
+    },
 }
 
-for table_name, data in gold_tables.items():
-    if catalog.table_exists(table_name):
-        print(f"🔄 {table_name} exists — overwriting...")
-        catalog.drop_table(table_name)
 
-    folder = table_name.replace(".", "/")
-    table = catalog.create_table(
-        table_name,
-        schema=data.schema,
-        location=f"gs://lakehouse-nyc-taxi/iceberg/{folder}"
+def _with_created_at(table: pa.Table) -> pa.Table:
+    """Append a `_created_at` audit column to an aggregation result."""
+    return table.append_column(
+        "_created_at",
+        pa.array([datetime.now()] * len(table), type=pa.timestamp("us")),
     )
-    table.append(data)
-    print(f"✅ {table_name} written — {len(data):,} rows")
 
-print(f"""
+
+def run(month: str | None = None) -> None:
+    """Recompute every gold table from the full silver layer. `month` is ignored
+    (gold is a global recompute) but accepted so the step has a uniform signature."""
+    catalog = get_catalog()
+
+    # Load the full silver table and expose it to DuckDB as a view.
+    print("📂 Reading silver layer...")
+    silver = catalog.load_table(SILVER_TABLE).scan().to_arrow()
+    print(f"   Rows loaded: {len(silver):,}")
+
+    con = duckdb.connect()
+    con.register("silver", silver)
+
+    for table_name, spec in GOLD_SPECS.items():
+        print(f"🔨 Building {table_name}...")
+        data = _with_created_at(con.execute(spec["sql"]).to_arrow_table())
+
+        if catalog.table_exists(table_name):
+            # Replace all rows in a single new snapshot (idempotent refresh).
+            catalog.load_table(table_name).overwrite(data)
+        else:
+            table = catalog.create_table(
+                table_name,
+                schema=data.schema,
+                location=spec["location"],
+            )
+            table.append(data)
+        print(f"✅ {table_name} written — {len(data):,} rows")
+
+    print("""
 ✅ Gold layer complete!
-   Tables written:
-   - gold.trips_by_hour      ({len(trips_by_hour)} rows)
-   - gold.trips_by_payment   ({len(trips_by_payment)} rows)
-   - gold.vendor_summary     ({len(vendor_summary)} rows)
-   - gold.daily_summary      ({len(daily_summary)} rows)
+   Tables refreshed: gold.trips_by_hour, gold.trips_by_payment,
+                     gold.vendor_summary, gold.daily_summary
    Location: gs://lakehouse-nyc-taxi/iceberg/gold/
 """)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Rebuild the gold aggregation tables from the silver Iceberg table."
+    )
+    # Accepted for a uniform CLI across the three layers; gold ignores it.
+    parser.add_argument("--month", required=False, help="Ignored — gold is a global recompute.")
+    run(parser.parse_args().month)
+
+
+if __name__ == "__main__":
+    main()

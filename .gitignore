@@ -19,4 +19,14 @@ dbt_nyc_taxi/.user.yml
 .DS_Store
 
 # Credentials
-gcp-key.jsonlogs/
+gcp-key.json
+
+# Logs
+logs/
+airflow/logs/
+
+# Local env file for docker compose
+.env
+
+# Partial / in-progress downloads
+*.part

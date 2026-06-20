@@ -1,0 +1,18 @@
+# Python dependencies for the NYC Taxi lakehouse pipeline.
+# Installed both locally (for running the scripts directly) and into the
+# Airflow image (airflow/Dockerfile) so the DAG's tasks can run the pipeline.
+
+# Iceberg catalog + table I/O. The pyarrow extra brings PyArrow, whose native
+# GcsFileSystem handles gs:// reads/writes using Application Default Credentials
+# (the same gcloud ADC used locally); sql-sqlite is the catalog backend.
+# (No gcsfs extra: this mirrors the working local setup, which uses PyArrow's GCS.)
+pyiceberg[sql-sqlite,pyarrow]==0.11.1
+
+# Gold-layer aggregation (GROUP BY over the silver data).
+duckdb>=1.0
+
+# Used by some PyIceberg/PyArrow conversions.
+pandas>=2.0
+
+# dbt transformations on top of the gold layer (BigQuery adapter).
+dbt-bigquery>=1.8,<2.0

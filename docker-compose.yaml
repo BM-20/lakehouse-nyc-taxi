@@ -1,0 +1,109 @@
+# Local Airflow stack for the NYC Taxi lakehouse pipeline.
+#
+# Trimmed-down version of the official Airflow compose file: LocalExecutor +
+# Postgres only (no Celery/Redis/worker), which is plenty for a single-machine
+# project and keeps the SQLite Iceberg catalog a single writer.
+#
+# Quick start:
+#   cp .env.example .env          # then set AIRFLOW_UID (see the file)
+#   docker compose build
+#   docker compose up -d
+#   open http://localhost:8080    # login: airflow / airflow
+#
+# The whole project is mounted at /opt/airflow/project so the DAG's BashOperator
+# tasks can run scripts/*.py and read/write the catalog, data/ and dbt project.
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # Stable dev secret so the webserver session survives restarts.
+    AIRFLOW__WEBSERVER__SECRET_KEY: nyc-taxi-lakehouse-dev
+    # GCS + BigQuery auth uses gcloud Application Default Credentials, mounted
+    # read-only below (matches how the pipeline authenticates locally — both
+    # PyIceberg's PyArrow GCS and the dbt oauth profile pick it up from here).
+    CLOUDSDK_CONFIG: /home/airflow/.config/gcloud
+    # dbt looks here for profiles.yml (mounted from the host ~/.dbt).
+    DBT_PROFILES_DIR: /home/airflow/.dbt
+    # Set RUN_DBT=false to skip the dbt run/test tasks (e.g. if BigQuery isn't
+    # configured in the container yet).
+    RUN_DBT: "${RUN_DBT:-true}"
+    # Lets `import scripts...` resolve if ever needed; the BashOperators use the
+    # file path directly so this is just belt-and-braces.
+    PYTHONPATH: /opt/airflow/project
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./:/opt/airflow/project
+    - ${HOME}/.dbt:/home/airflow/.dbt:ro
+    - ${HOME}/.config/gcloud:/home/airflow/.config/gcloud:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # One-shot init: migrates the metadata DB and creates the admin user via the
+  # image's own entrypoint (which also registers a passwd entry for AIRFLOW_UID —
+  # required for `airflow` to run as a non-builtin uid). Driving init through the
+  # entrypoint env vars instead of overriding the entrypoint is the supported
+  # pattern; overriding it skips the passwd setup and `airflow db migrate` fails.
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
