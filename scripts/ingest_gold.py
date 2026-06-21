@@ -29,6 +29,7 @@ SILVER_TABLE = "silver.yellow_taxi_cleaned"
 GOLD_SPECS = {
     "gold.trips_by_hour": {
         "location": "gs://lakehouse-nyc-taxi/iceberg/gold/trips_by_hour",
+        "cols": ("pickup_hour", "fare_amount", "trip_distance"),
         "sql": """
             SELECT
                 pickup_hour,
@@ -42,6 +43,7 @@ GOLD_SPECS = {
     },
     "gold.trips_by_payment": {
         "location": "gs://lakehouse-nyc-taxi/iceberg/gold/trips_by_payment",
+        "cols": ("payment_type", "total_amount", "tip_amount"),
         "sql": """
             SELECT
                 payment_type,
@@ -55,6 +57,7 @@ GOLD_SPECS = {
     },
     "gold.vendor_summary": {
         "location": "gs://lakehouse-nyc-taxi/iceberg/gold/vendor_summary",
+        "cols": ("vendor_name", "fare_amount", "trip_distance", "trip_duration_minutes"),
         "sql": """
             SELECT
                 vendor_name,
@@ -69,6 +72,7 @@ GOLD_SPECS = {
     },
     "gold.daily_summary": {
         "location": "gs://lakehouse-nyc-taxi/iceberg/gold/daily_summary",
+        "cols": ("pickup_datetime", "total_amount", "fare_amount", "trip_distance"),
         "sql": """
             SELECT
                 CAST(pickup_datetime AS DATE)  AS pickup_date,
@@ -96,18 +100,20 @@ def run(month: str | None = None) -> None:
     """Recompute every gold table from the full silver layer. `month` is ignored
     (gold is a global recompute) but accepted so the step has a uniform signature."""
     catalog = get_catalog()
+    silver_tbl = catalog.load_table(SILVER_TABLE)
 
-    # Load the full silver table and expose it to DuckDB as a view.
-    print("📂 Reading silver layer...")
-    silver = catalog.load_table(SILVER_TABLE).scan().to_arrow()
-    print(f"   Rows loaded: {len(silver):,}")
-
+    # Each gold table is recomputed from *all* of silver, which grows month over
+    # month. Rather than materialising the whole table (which OOMs once it spans
+    # many months), run each aggregation as a streaming GROUP BY directly over a
+    # fresh Arrow batch reader, projected to just the columns it needs. DuckDB
+    # then only ever holds the small group state, never the millions of rows.
     con = duckdb.connect()
-    con.register("silver", silver)
-
     for table_name, spec in GOLD_SPECS.items():
-        print(f"🔨 Building {table_name}...")
+        print(f"🔨 Building {table_name} (streaming silver)...")
+        reader = silver_tbl.scan(selected_fields=spec["cols"]).to_arrow_batch_reader()
+        con.register("silver", reader)
         data = _with_created_at(con.execute(spec["sql"]).to_arrow_table())
+        con.unregister("silver")
 
         if catalog.table_exists(table_name):
             # Replace all rows in a single new snapshot (idempotent refresh).
@@ -120,6 +126,7 @@ def run(month: str | None = None) -> None:
             )
             table.append(data)
         print(f"✅ {table_name} written — {len(data):,} rows")
+    con.close()
 
     print("""
 ✅ Gold layer complete!

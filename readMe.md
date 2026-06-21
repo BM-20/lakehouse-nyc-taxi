@@ -2,7 +2,7 @@ A data lakehouse built on Apache Iceberg, processing real NYC taxi trip data thr
 
 ## Project Overview
 
-This project ingests real NYC Yellow Taxi trip data from January 2024 (2.96 million trips) and processes it through a medallion architecture using Apache Iceberg on Google Cloud Storage. Raw data lands in a bronze layer, gets cleaned and enriched in silver, then aggregated into business ready gold tables. BigQuery reads the gold layer as native Iceberg external tables, and dbt builds a staging and marts layer on top with tests and full lineage documentation. A Looker Studio dashboard visualises trip demand, revenue, and vendor activity.
+This project ingests real NYC Yellow Taxi trip data — January–October 2024, ~33.8 million trips (~29.3M after cleaning) loaded month by month — and processes it through a medallion architecture using Apache Iceberg on Google Cloud Storage. Raw data lands in a bronze layer, gets cleaned and enriched in silver, then aggregated into business ready gold tables. BigQuery reads the gold layer as native Iceberg external tables, and dbt builds a staging and marts layer on top with tests and full lineage documentation. A Looker Studio dashboard visualises trip demand, revenue, and vendor activity.
 
 Loading is **incremental and idempotent** — the pipeline works a month at a time, appending each new month as a fresh Iceberg snapshot and safely skipping months already loaded — and the whole flow (bronze → silver → gold → dbt) is **orchestrated by Apache Airflow** on a monthly schedule running in Docker.
 
@@ -10,7 +10,7 @@ Loading is **incremental and idempotent** — the pipeline works a month at a ti
 
 | Component | Tool | Notes |
 |---|---|---|
-| Source data | NYC TLC Yellow Taxi Trips | Monthly parquet files, auto-downloaded (2.96M trips in Jan 2024 alone) |
+| Source data | NYC TLC Yellow Taxi Trips | Monthly parquet files, auto-downloaded (~33.8M trips across Jan–Oct 2024) |
 | Table format | Apache Iceberg | ACID transactions, schema enforcement, snapshot history |
 | Processing | Python (PyArrow, PyIceberg, DuckDB) | Incremental, month-parameterized bronze/silver/gold scripts |
 | Storage | Google Cloud Storage | Iceberg tables stored as managed GCS objects |
@@ -30,7 +30,7 @@ The month's source Parquet is read (auto-downloaded from the public NYC TLC host
 Only the new month's rows are read from bronze (an Iceberg row-filter scan on `_source_file`, not a full-table read), then cleaned and standardised before being **appended** to the silver table. Invalid trips are filtered out (zero or negative fares, zero distance, zero passengers, distance and fare outliers). Calculated columns are added (`trip_duration_minutes`, `pickup_hour`, `pickup_day_of_week`), and `payment_type` and `VendorID` are decoded from raw integer codes into readable labels.
 
 ### Gold Layer
-Because the aggregates are global, the gold tables are recomputed from the **full** silver layer (via DuckDB `GROUP BY`) and **overwritten** in place on each run — correct by construction and idempotent, while still recording a new Iceberg snapshot. Four business ready aggregation tables are built:
+Because the aggregates are global, the gold tables are recomputed from the **full** silver layer and **overwritten** in place on each run — correct by construction and idempotent, while still recording a new Iceberg snapshot. Each aggregate runs as a **streaming** DuckDB `GROUP BY` over the silver layer (projected to just the columns it needs), so memory stays bounded even as the data grows to tens of millions of rows. Four business ready aggregation tables are built:
 - `trips_by_hour` — demand and average fare by hour of day
 - `trips_by_payment` — revenue and tipping behaviour by payment method
 - `vendor_summary` — trip volume and fare comparison between vendors
@@ -166,7 +166,7 @@ lakehouse-project/
 
 ### Looker Studio Dashboard
 ![Looker Dashboard](screenshots/looker_dashboard.png)
-*NYC Taxi Lakehouse dashboard showing taxi demand by hour, revenue share by payment method, trip volume by vendor, and daily trip trends across January 2024*
+*NYC Taxi Lakehouse dashboard showing taxi demand by hour, revenue share by payment method, trip volume by vendor, and daily trip trends. Captured against the original January 2024 load; the pipeline now spans January–October 2024 (re-publish the dashboard to refresh).*
 
 ## Future Work
 
