@@ -63,6 +63,23 @@ def run(month: str) -> None:
         ),
         pc.less_equal(df["fare_amount"], 500)
     )
+
+    # Drop trips whose pickup falls outside the file's own month. A tiny number
+    # of source rows carry corrupt meter timestamps (years like 2002/2009, or
+    # future dates) or spill into an adjacent month; this keeps each monthly load
+    # to the month it actually represents. Bronze still retains them untouched.
+    year, mon = (int(p) for p in month.split("-"))
+    ts_type = df["tpep_pickup_datetime"].type
+    month_start = pa.scalar(datetime(year, mon, 1), type=ts_type)
+    next_month_start = pa.scalar(datetime(year + (mon == 12), (mon % 12) + 1, 1), type=ts_type)
+    mask = pc.and_(
+        mask,
+        pc.and_(
+            pc.greater_equal(df["tpep_pickup_datetime"], month_start),
+            pc.less(df["tpep_pickup_datetime"], next_month_start),
+        ),
+    )
+
     df = df.filter(mask)
     print(f"   Rows after cleaning: {len(df):,}")
 
