@@ -45,6 +45,10 @@ with DAG(
     description="Incremental monthly NYC taxi lakehouse: bronze -> silver -> gold -> dbt",
     schedule="@monthly",
     start_date=datetime(2024, 1, 1),
+    # Bound the schedule to the months actually loaded (Jan–Oct 2024). With
+    # catchup, unpausing only ever (re)runs Jan–Oct — it can't wander into
+    # not-yet-loaded months. Bump this when you load more.
+    end_date=datetime(2024, 10, 31),
     catchup=True,
     max_active_runs=1,  # serialize months: single SQLite-catalog writer, ordered loads
     default_args=default_args,
