@@ -1,4 +1,4 @@
--- Daily trip volume and revenue trends across January 2024
+-- Daily trip volume and revenue trends across Jan–Oct 2024
 with daily as (
     select * from {{ ref('stg_daily_summary') }}
 )

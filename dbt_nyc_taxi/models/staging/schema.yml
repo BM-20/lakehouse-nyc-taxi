@@ -2,7 +2,7 @@ version: 2
 
 models:
   - name: stg_daily_summary
-    description: Daily trip and revenue summary filtered to January 2024
+    description: Daily trip and revenue summary filtered to Jan–Oct 2024
     columns:
       - name: pickup_date
         description: Date of taxi pickup

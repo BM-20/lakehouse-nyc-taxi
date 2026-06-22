@@ -71,7 +71,7 @@ models:
         description: This vendor's share of total trips
 
   - name: weekly_trends
-    description: Daily trip volume and revenue trends across January 2024, with day-over-day deltas
+    description: Daily trip volume and revenue trends across Jan–Oct 2024, with day-over-day deltas
     columns:
       - name: pickup_date
         description: Date of taxi pickups
