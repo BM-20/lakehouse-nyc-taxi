@@ -143,6 +143,7 @@ lakehouse-project/
 │   │       ├── weekly_trends.sql
 │   │       └── schema.yml
 └── screenshots/
+    ├── airflow_grid.png        
     ├── gcs_layers.png          
     ├── iceberg_time_travel.png 
     ├── bigquery_results.png    
@@ -151,6 +152,10 @@ lakehouse-project/
 ```
 
 ## Evaluation
+
+### Airflow Orchestration
+![Airflow DAG runs](screenshots/airflow_grid.png)
+*The `nyc_taxi_lakehouse` DAG in Airflow's grid view — one green run per month (Jan–Oct 2024), each chaining ingest_bronze → ingest_silver → ingest_gold → dbt_run → dbt_test. The monthly schedule with catchup is what drives the incremental load.*
 
 ### GCS Iceberg Layers
 ![GCS Layers](screenshots/gcs_layers.png)
@@ -166,7 +171,7 @@ lakehouse-project/
 
 ### Looker Studio Dashboard
 ![Looker Dashboard](screenshots/looker_dashboard.png)
-*NYC Taxi Lakehouse dashboard showing taxi demand by hour, revenue share by payment method, trip volume by vendor, and daily trip trends. Captured against the original January 2024 load; the pipeline now spans January–October 2024 (re-publish the dashboard to refresh).*
+*NYC Taxi Lakehouse dashboard showing taxi demand by hour, revenue share by payment method, trip volume by vendor, and daily trip trends across January–October 2024.*
 
 ## Future Work
 
