@@ -59,17 +59,17 @@ pip install -r requirements.txt
 
 ```bash
 # Bronze
-python scripts/ingest_bronze.py 
+python scripts/ingest_bronze.py --month 2024-01
 
 # Silver
-python scripts/ingest_silver.py 
+python scripts/ingest_silver.py --month 2024-01
 
 # Gold
 python scripts/ingest_gold.py
 
 # Load the next month
-python scripts/ingest_bronze.py
-python scripts/ingest_silver.py
+python scripts/ingest_bronze.py --month 2024-02
+python scripts/ingest_silver.py --month 2024-02
 python scripts/ingest_gold.py
 
 # dbt transformations on top of the gold layer
